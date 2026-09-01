@@ -1,6 +1,7 @@
 import re
 import sys
 import json
+import os
 
 def parse_args():
     return sys.argv[1] if len(sys.argv) > 1 else "./data/tmp.v"
@@ -12,6 +13,24 @@ def read_file(file_path):
     except FileNotFoundError:
         print(f"Файл {file_path} не найден", file=sys.stderr)
         sys.exit(1)
+
+def split_concat(inner):
+    elements = []
+    current = []
+    depth = 0
+    for ch in inner:
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+        elif ch == ',' and depth == 0:
+            elements.append(''.join(current).strip())
+            current = []
+            continue
+        current.append(ch)
+    if current:
+        elements.append(''.join(current).strip())
+    return elements
 
 def extract_signals(code):
     signals = []
@@ -81,13 +100,51 @@ def build_json_data(code, prefixes=["port"]):
             expr = item["expression"].rstrip()
             if expr.endswith('}'):
                 expr = expr[:-1].rstrip()
-            elements = [e.strip() for e in expr.split(',') if e.strip()]
-            filtered_items.append({"signal": signal, "elements": elements})
+            lines = expr.split('\n')
+            elements_with_comments = []
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                if line.startswith('//'):
+                    continue
+                comment = ""
+                if '//' in line:
+                    parts = line.split('//', 1)
+                    wire_part = parts[0].strip()
+                    comment = parts[1].strip() if len(parts) > 1 else ""
+                else:
+                    wire_part = line
+                if wire_part.endswith(','):
+                    wire_part = wire_part[:-1].strip()
+                if not wire_part:
+                    continue
+                elements_with_comments.append({"wire": wire_part, "comment": comment})
+            filtered_items.append({"signal": signal, "elements": elements_with_comments})
     return {
         "signals": signals,
         "all_assigns": all_assigns,
         "filtered_assigns": filtered_items
     }
+
+def print_table(output, md_file_name=None):
+    if not output.get("filtered_assigns"):
+        print("Нет данных для отображения.")
+        return
+    lines = []
+    for item in output["filtered_assigns"]:
+        lines.append(f"## {item['signal']}")
+        lines.append("| wire | comment |")
+        lines.append("|------|---------|")
+        for elem in item["elements"]:
+            lines.append(f"| {elem['wire']} | {elem['comment']} |")
+        lines.append("")
+    if md_file_name:
+        os.makedirs(os.path.dirname(md_file_name), exist_ok=True)
+        with open(md_file_name, 'w') as f:
+            f.write('\n'.join(lines))
+    else:
+        print('\n'.join(lines))
 
 def main():
     file_path = parse_args()
@@ -98,7 +155,10 @@ def main():
         "all_assigns": data["all_assigns"],
         "filtered_assigns": data["filtered_assigns"]
     }
+    # Вывод JSON на экран
     print(json.dumps(output, indent=2, ensure_ascii=False))
+    # Сохранение таблицы в файл
+    print_table(output, "./data/table.md")
 
 if __name__ == "__main__":
     main()
