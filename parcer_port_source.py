@@ -296,33 +296,41 @@ def load_config(config_file="config.json"):
     with open(config_file, 'r') as f:
         return json.load(f)
 
+
+def process_port_source(lines, port_filter, total_width, file_src):
+    filtered = filter_assigns_by_port(lines, port_filter)
+
+    parsed_results = []
+    for line in filtered:
+        parsed = parse_assign_line(line, total_width, port_filter)
+        if parsed:
+            parsed_results.append(parsed)
+
+    print_pretty_parsed(parsed_results)
+    print(json.dumps(parsed_results, indent=2, ensure_ascii=False))
+
+    print("\n=== Markdown Table ===")
+    table = generate_markdown_table(parsed_results, port_filter, total_width)
+    print(table)
+    save_markdown_table(table, port_filter, file_src)
+
+    return parsed_results
+
+
 def main():
-    config = load_config("./config.json")
+    config = load_config("data/config.json")
     file_src = config["file_src"]
     configs = config["configs"]
+
+    lines = read_file_lines(file_src)
 
     for cfg in configs:
         port_filter = cfg["port_filter"]
         total_width = cfg["total_width"]
 
         print(f"\n=== Processing {port_filter} (width {total_width}) ===")
+        process_port_source(lines, port_filter, total_width, file_src)
 
-        lines = read_file_lines(file_src)
-        filtered = filter_assigns_by_port(lines, port_filter)
-
-        parsed_results = []
-        for line in filtered:
-            parsed = parse_assign_line(line, total_width, port_filter)
-            if parsed:
-                parsed_results.append(parsed)
-
-        print_pretty_parsed(parsed_results)
-        print(json.dumps(parsed_results, indent=2, ensure_ascii=False))
-
-        print("\n=== Markdown Table ===")
-        table = generate_markdown_table(parsed_results, port_filter, total_width)
-        print(table)
-        save_markdown_table(table, port_filter, file_src)
 
 if __name__ == "__main__":
     main()
