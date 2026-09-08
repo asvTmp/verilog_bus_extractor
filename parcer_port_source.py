@@ -22,7 +22,12 @@ def filter_assigns_by_port(lines, port_name):
     return result
 
 
-def parse_assign_line(line, total_width=16, port_filter=None):
+def load_config(config_file="data/config.json"):
+    with open(config_file, 'r') as f:
+        return json.load(f)
+
+
+def parse_assign_line_bitwise(line, total_width=16, port_filter=None):
     line = line.strip()
     if not line.startswith("assign"):
         return None
@@ -49,7 +54,7 @@ def parse_assign_line(line, total_width=16, port_filter=None):
         "source_range": "",
         "source_width": 1,
         "comment": "",
-        "not_used": []
+        "bits": {}
     }
 
     comment = ""
@@ -152,37 +157,30 @@ def parse_assign_line(line, total_width=16, port_filter=None):
         else:
             result["source"] = src
 
-    if result["source"]:
-        occupied = set()
-        if result["source_range"]:
-            rng = result["source_range"]
-            if ':' in rng:
-                msb, lsb = rng.split(':')
-                for bit in range(int(lsb), int(msb) + 1):
-                    occupied.add(bit)
-            else:
-                occupied.add(int(rng))
+    for bit in range(total_width):
+        result["bits"][bit] = "-"
 
-        free_bits = []
-        current_range = None
-        for bit in range(total_width - 1, -1, -1):
-            if bit not in occupied:
-                if current_range is None:
-                    current_range = [bit, bit]
-                else:
-                    current_range[1] = bit
+    if result["source"] == port_filter and result["source_range"]:
+        rng = result["source_range"]
+        if ':' in rng:
+            msb, lsb = rng.split(':')
+            msb, lsb = int(msb), int(lsb)
+            if result["target_range"]:
+                t_msb, t_lsb = result["target_range"].split(':')
+                t_msb, t_lsb = int(t_msb), int(t_lsb)
+                for i in range(abs(msb - lsb) + 1):
+                    src_bit = lsb + i if lsb <= msb else msb + i
+                    tgt_bit = t_lsb + i if t_lsb <= t_msb else t_msb + i
+                    if 0 <= src_bit < total_width:
+                        result["bits"][src_bit] = f"{result['target']}[{tgt_bit}]"
             else:
-                if current_range is not None:
-                    free_bits.append(current_range)
-                    current_range = None
-        if current_range is not None:
-            free_bits.append(current_range)
-
-        for msb, lsb in free_bits:
-            if msb == lsb:
-                result["not_used"].append(f"{msb}")
-            else:
-                result["not_used"].append(f"{msb}:{lsb}")
+                bit = int(rng) if ':' not in rng else lsb
+                if 0 <= bit < total_width:
+                    result["bits"][bit] = result["target"]
+        else:
+            bit = int(rng)
+            if 0 <= bit < total_width:
+                result["bits"][bit] = result["target"]
 
     return result
 
@@ -212,72 +210,28 @@ def print_pretty_parsed(parsed_list):
             print(f"Default: {parsed['default']}")
         if parsed['comment']:
             print(f"Comment: {parsed['comment']}")
-        if parsed['not_used']:
-            print(f"Not used bits: {', '.join(parsed['not_used'])}")
         print("=" * 60)
         print()
 
 
-def generate_markdown_table(parsed_results, source_port, total_width=16):
+def generate_markdown_table_bitwise(parsed_results, source_port, total_width=16):
     lines = []
     lines.append(f"| {source_port} | name | comment |")
     lines.append("|-------|---------|---------|")
 
-    range_data = {}
+    bit_map = {}
     for item in parsed_results:
         if item["source"] == source_port:
-            rng = item["source_range"] if item["source_range"] else "0"
-            target_name = item["target"]
-            target_range = item["target_range"]
-            target_str = f"{target_name}[{target_range}]" if target_range else target_name
-            comment = item.get("comment", "")
-            range_data[rng] = (target_str, comment)
+            for bit, name in item["bits"].items():
+                if name != "-":
+                    bit_map[bit] = (name, item["comment"])
 
-    occupied = set()
-    for item in parsed_results:
-        if item["source"] == source_port:
-            rng = item["source_range"] if item["source_range"] else "0"
-            if ':' in rng:
-                msb, lsb = rng.split(':')
-                for bit in range(int(lsb), int(msb) + 1):
-                    occupied.add(bit)
-            else:
-                occupied.add(int(rng))
-
-    free_ranges = []
-    current_range = None
     for bit in range(total_width - 1, -1, -1):
-        if bit not in occupied:
-            if current_range is None:
-                current_range = [bit, bit]
-            else:
-                current_range[1] = bit
+        if bit in bit_map:
+            name, comment = bit_map[bit]
+            lines.append(f"| {bit} | {name} | {comment} |")
         else:
-            if current_range is not None:
-                free_ranges.append(current_range)
-                current_range = None
-    if current_range is not None:
-        free_ranges.append(current_range)
-
-    table_rows = []
-    for rng, (name, comment) in range_data.items():
-        table_rows.append((rng, name, comment, False))
-    for msb, lsb in free_ranges:
-        if msb == lsb:
-            table_rows.append((str(msb), "-", "", True))
-        else:
-            table_rows.append((f"{msb}:{lsb}", "-", "", True))
-
-    def sort_key(row):
-        rng = row[0]
-        if ':' in rng:
-            msb, lsb = rng.split(':')
-            return int(msb)
-        return int(rng)
-
-    table_rows.sort(key=sort_key, reverse=True)
-    for rng, name, comment, is_not_used in table_rows:
-        lines.append(f"| {rng} | {name} | {comment} |")
+            lines.append(f"| {bit} | - | |")
 
     return "\n".join(lines)
 
@@ -292,17 +246,13 @@ def save_markdown_table(table, port_filter, file_path):
         f.write(table)
     print(f"Table saved to: {output_file}")
 
-def load_config(config_file="config.json"):
-    with open(config_file, 'r') as f:
-        return json.load(f)
-
 
 def process_port_source(lines, port_filter, total_width, file_src):
     filtered = filter_assigns_by_port(lines, port_filter)
 
     parsed_results = []
     for line in filtered:
-        parsed = parse_assign_line(line, total_width, port_filter)
+        parsed = parse_assign_line_bitwise(line, total_width, port_filter)
         if parsed:
             parsed_results.append(parsed)
 
@@ -310,7 +260,7 @@ def process_port_source(lines, port_filter, total_width, file_src):
     print(json.dumps(parsed_results, indent=2, ensure_ascii=False))
 
     print("\n=== Markdown Table ===")
-    table = generate_markdown_table(parsed_results, port_filter, total_width)
+    table = generate_markdown_table_bitwise(parsed_results, port_filter, total_width)
     print(table)
     save_markdown_table(table, port_filter, file_src)
 
