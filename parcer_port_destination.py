@@ -1,286 +1,323 @@
+# parcer_port_destination.py
 import sys
+import re
 import json
 import os
-import re
+from parcer_port import read_file_lines, load_config
 
 
-def read_file_lines(file_path):
-    with open(file_path, 'r') as f:
-        return f.readlines()
+def extract_assign_block(lines, port_name):
+    """Извлекает строки assign-блока для заданного порта."""
+    start_pattern = re.compile(
+        r'^\s*assign\s+' + re.escape(port_name) + r'\s*=\s*\{'
+    )
+    start_idx = None
+    for i, line in enumerate(lines):
+        if start_pattern.search(line):
+            start_idx = i
+            break
+    if start_idx is None:
+        return None
+
+    block_lines = []
+    depth = 0
+    in_block = False
+    for i in range(start_idx, len(lines)):
+        line = lines[i].rstrip('\n')
+        if not in_block:
+            brace_pos = line.find('{')
+            if brace_pos == -1:
+                continue
+            depth = 1
+            rest = line[brace_pos + 1:]
+            for ch in rest:
+                if ch == '{':
+                    depth += 1
+                elif ch == '}':
+                    depth -= 1
+                    if depth == 0:
+                        block_lines.append(line)
+                        return block_lines
+            block_lines.append(line)
+            in_block = True
+        else:
+            for ch in line:
+                if ch == '{':
+                    depth += 1
+                elif ch == '}':
+                    depth -= 1
+                    if depth == 0:
+                        block_lines.append(line)
+                        return block_lines
+            block_lines.append(line)
+    return block_lines if depth == 0 else None
 
 
-def load_config(config_file="data/config.json"):
-    with open(config_file, 'r') as f:
-        return json.load(f)
+def print_assign_block(block):
+    """Выводит содержимое assign-блока."""
+    if block is None:
+        print("Блок не найден.")
+        return
+    for line in block:
+        print(line)
 
 
-def filter_assigns_by_destination(lines, dest_name):
-    result = []
+def parse_signal_declarations(lines):
+    """Собирает словарь ширин сигналов из объявлений."""
+    signal_widths = {}
+    pattern = re.compile(
+        r'^\s*(?:input|output|inout|logic|wire|reg)\s*'
+        r'(?:\[(\d+)\s*:\s*(\d+)\])?\s*'
+        r'([a-zA-Z_]\w*)\s*;'
+    )
     for line in lines:
-        stripped = line.strip()
-        if not stripped.startswith("assign"):
+        match = pattern.search(line)
+        if match:
+            msb = match.group(1)
+            lsb = match.group(2)
+            name = match.group(3)
+            if msb is not None and lsb is not None:
+                width = abs(int(msb) - int(lsb)) + 1
+            else:
+                width = 1
+            signal_widths[name] = width
+    return signal_widths
+
+
+def parse_assign_block_elements(block_lines):
+    """
+    Разбирает строки assign-блока на отдельные элементы конкатенации.
+    Каждый элемент – словарь с ключами 'expr' и 'comment'.
+    """
+    elements = []
+    if not block_lines:
+        return elements
+
+    first_brace_line = last_brace_line = None
+    for i, line in enumerate(block_lines):
+        if '{' in line and first_brace_line is None:
+            first_brace_line = i
+        if '}' in line:
+            last_brace_line = i
+    if first_brace_line is None or last_brace_line is None:
+        return elements
+
+    for i, line in enumerate(block_lines):
+        if i == first_brace_line:
+            pos = line.find('{')
+            line = line[pos+1:]
+        elif i == last_brace_line:
+            pos = line.find('}')
+            line = line[:pos]
+
+        line = line.strip()
+        if not line:
             continue
-        if "=" in stripped:
-            parts = stripped.split("=", 1)
-            left_part = parts[0].strip()
-            if dest_name in left_part:
-                result.append(line)
-    return result
+
+        if '//' in line:
+            code_part, _, comment = line.partition('//')
+            comment = comment.strip()
+        else:
+            code_part = line
+            comment = None
+
+        code_part = code_part.strip()
+        if not code_part:
+            continue
+
+        parts = [p.strip() for p in code_part.split(',') if p.strip()]
+        for j, part in enumerate(parts):
+            current_comment = comment if (j == len(parts)-1 and comment is not None) else None
+            elements.append({"expr": part, "comment": current_comment})
+
+    return elements
 
 
-def parse_dest_line_bitwise(line, total_width=16, dest_filter=None):
-    line = line.strip()
-    if not line.startswith("assign"):
-        return None
+def build_mapping(elements, signal_widths):
+    """
+    Строит список mapping для каждого бита выходного порта.
+    Возвращает (total_width, mapping).
+    mapping – список словарей: {'bit': int, 'signal': str, 'comment': str}
+    """
+    temp_bits = []
+    for elem in elements:
+        expr = elem["expr"].strip()
+        comment = elem["comment"] if elem["comment"] else "-"
 
-    body = line[6:].strip()
-    if body.endswith(';'):
-        body = body[:-1].strip()
+        expr_clean = re.sub(r'\s+', '', expr)
 
-    if '=' not in body:
-        return None
+        if "'" in expr_clean:
+            m = re.match(r'(\d+)\s*\'', expr_clean)
+            if m:
+                width = int(m.group(1))
+                for _ in range(width):
+                    temp_bits.append(("0", "-"))
+            else:
+                temp_bits.append(("0", "-"))
+            continue
 
-    left, right = body.split('=', 1)
-    target = left.strip()
-    right = right.strip()
+        m = re.match(r'([a-zA-Z_]\w*)\[(\d+)(?::(\d+))?\]', expr_clean)
+        if m:
+            name = m.group(1)
+            msb = int(m.group(2))
+            if m.group(3) is not None:
+                lsb = int(m.group(3))
+                if msb >= lsb:
+                    bit_indices = list(range(msb, lsb - 1, -1))
+                else:
+                    bit_indices = list(range(msb, lsb + 1))
+            else:
+                bit_indices = [msb]
+            for b in bit_indices:
+                temp_bits.append((f"{name}[{b}]", comment))
+            continue
 
-    result = {
-        "full": line.strip(),
-        "target": target,
-        "source": "",
-        "condition": "",
-        "default": "",
-        "target_range": "",
-        "target_width": 1,
-        "source_range": "",
-        "source_width": 1,
-        "comment": "",
-        "bits": {}
+        name = expr_clean
+        if name in signal_widths:
+            width = signal_widths[name]
+        else:
+            width = 1
+        for _ in range(width):
+            temp_bits.append((name, comment))
+
+    total_width = len(temp_bits)
+    mapping = []
+    for idx, (signal, comment) in enumerate(temp_bits):
+        bit = total_width - 1 - idx
+        mapping.append({
+            "bit": bit,
+            "signal": signal,
+            "comment": comment
+        })
+
+    return total_width, mapping
+
+
+def json_to_markdown_table(data):
+    """
+    Преобразует словарь с данными порта в markdown-таблицу и выводит её.
+    """
+    port = data.get("port", "")
+    width = data.get("width", "")
+    mapping = data.get("mapping", [])
+
+    print(f"**Port:** {port}  ")
+    print(f"**Width:** {width}  ")
+    print()
+
+    print("| Bit | Signal | Comment |")
+    print("|-----|--------|---------|")
+
+    for item in mapping:
+        bit = item.get("bit", "")
+        signal = item.get("signal", "")
+        comment = item.get("comment", "")
+        signal = str(signal).replace("|", "\\|")
+        comment = str(comment).replace("|", "\\|")
+        print(f"| {bit} | {signal} | {comment} |")
+
+
+def save_markdown_to_file(data, source_file_path):
+    """
+    Сохраняет markdown таблицу в файл с именем порта (_dst.md) в каталоге исходного файла.
+    """
+    port = data.get("port", "unknown_port")
+    width = data.get("width", "")
+    mapping = data.get("mapping", [])
+
+    filename = f"{port}_dst.md"
+    directory = os.path.dirname(source_file_path)
+    if not directory:
+        directory = "."
+    filepath = os.path.join(directory, filename)
+
+    lines = []
+    lines.append(f"**Port:** {port}  ")
+    lines.append(f"**Width:** {width}  ")
+    lines.append("")
+    lines.append("| Bit | Signal | Comment |")
+    lines.append("|-----|--------|---------|")
+
+    for item in mapping:
+        bit = item.get("bit", "")
+        signal = item.get("signal", "")
+        comment = item.get("comment", "")
+        signal = str(signal).replace("|", "\\|")
+        comment = str(comment).replace("|", "\\|")
+        lines.append(f"| {bit} | {signal} | {comment} |")
+
+    markdown_text = "\n".join(lines)
+
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(markdown_text)
+
+    print(f"Markdown сохранён в {filepath}")
+
+
+def process_port_destination(lines, port_filter, total_width_cfg, file_src):
+    """
+    Обрабатывает один порт-назначение: извлекает assign-блок, парсит его,
+    строит маппинг, выводит JSON, markdown и сохраняет markdown в файл.
+    """
+    print(f"\n=== Processing DESTINATION {port_filter} ===")
+
+    block = extract_assign_block(lines, port_filter)
+    # print_assign_block(block)
+
+    if block is None:
+        print(f"Блок assign для порта '{port_filter}' не найден.")
+        return
+
+    elements = parse_assign_block_elements(block)
+    if not elements:
+        print("Не удалось разобрать элементы блока.")
+        return
+
+    # Получаем словарь ширин сигналов (можно было бы кэшировать, но для простоты вычисляем здесь)
+    signal_widths = parse_signal_declarations(lines)
+
+    actual_width, mapping = build_mapping(elements, signal_widths)
+
+    output = {
+        "port": port_filter,
+        "width": actual_width,
+        "mapping": mapping
     }
 
-    comment = ""
-    if '//' in right:
-        right_part, comment = right.split('//', 1)
-        right = right_part.strip()
-        comment = comment.strip()
-    result["comment"] = comment
+    # print(json.dumps(output, indent=2))
 
-    if '[' in target and ']' in target:
-        name, range_part = target.split('[', 1)
-        range_part = range_part.replace(']', '').strip()
-        range_part = re.sub(r'[^\d:]', '', range_part)
-        result["target_range"] = range_part
-        if ':' in range_part:
-            msb, lsb = range_part.split(':')
-            result["target_width"] = abs(int(msb) - int(lsb)) + 1
-        else:
-            result["target_width"] = 1
-        result["target"] = name.strip()
-    else:
-        result["target"] = target
-
-    if right.startswith('{'):
-        inner = right[1:].strip()
-        depth = 0
-        end_pos = -1
-        for i, ch in enumerate(inner):
-            if ch == '{':
-                depth += 1
-            elif ch == '}':
-                depth -= 1
-                if depth == 0:
-                    end_pos = i
-                    break
-        if end_pos != -1:
-            inner = inner[:end_pos].strip()
-        elements = [e.strip() for e in inner.split(',')]
-        for elem in elements:
-            if dest_filter and dest_filter in elem:
-                elem_clean = re.sub(r'^[~!&|]', '', elem).strip()
-                if '[' in elem_clean and ']' in elem_clean:
-                    name, range_part = elem_clean.split('[', 1)
-                    range_part = range_part.replace(']', '').strip()
-                    range_part = re.sub(r'[^\d:]', '', range_part)
-                    result["source"] = name.strip()
-                    result["source_range"] = range_part
-                    if ':' in range_part:
-                        msb, lsb = range_part.split(':')
-                        result["source_width"] = abs(int(msb) - int(lsb)) + 1
-                    else:
-                        result["source_width"] = 1
-                else:
-                    result["source"] = elem_clean
-                    result["source_range"] = ""
-                    result["source_width"] = 1
-                break
-    else:
-        if '?' in right and ':' in right:
-            question_pos = right.find('?')
-            colon_pos = -1
-            depth = 0
-            for i, ch in enumerate(right):
-                if ch == '[':
-                    depth += 1
-                elif ch == ']':
-                    depth -= 1
-                elif ch == ':' and depth == 0 and i > question_pos:
-                    colon_pos = i
-                    break
-
-            if colon_pos != -1:
-                condition_part = right[:question_pos].strip()
-                source_part = right[question_pos + 1:colon_pos].strip()
-                default_part = right[colon_pos + 1:].strip()
-                result["condition"] = condition_part
-                result["source"] = source_part
-                result["default"] = default_part
-            else:
-                result["source"] = right
-        else:
-            result["source"] = right
-
-        src = result["source"]
-        src = src.rstrip(';')
-        src = re.sub(r'^[~!&|]', '', src).strip()
-
-        if '[' in src and ']' in src:
-            name, range_part = src.split('[', 1)
-            range_part = range_part.replace(']', '').strip()
-            range_part = range_part.rstrip(';')
-            range_part = re.sub(r'[^\d:]', '', range_part)
-            result["source_range"] = range_part
-            if ':' in range_part:
-                msb, lsb = range_part.split(':')
-                result["source_width"] = abs(int(msb) - int(lsb)) + 1
-            else:
-                result["source_width"] = 1
-            result["source"] = name.strip()
-        else:
-            result["source"] = src
-
-    for bit in range(total_width):
-        result["bits"][bit] = "-"
-
-    if result["target"] == dest_filter and result["target_range"]:
-        rng = result["target_range"]
-        if ':' in rng:
-            msb, lsb = rng.split(':')
-            msb, lsb = int(msb), int(lsb)
-            if result["source_range"]:
-                s_msb, s_lsb = result["source_range"].split(':')
-                s_msb, s_lsb = int(s_msb), int(s_lsb)
-                for i in range(abs(msb - lsb) + 1):
-                    dest_bit = lsb + i if lsb <= msb else msb + i
-                    src_bit = s_lsb + i if s_lsb <= s_msb else s_msb + i
-                    if 0 <= dest_bit < total_width:
-                        result["bits"][dest_bit] = f"{result['source']}[{src_bit}]"
-            else:
-                bit = int(rng) if ':' not in rng else lsb
-                if 0 <= bit < total_width:
-                    result["bits"][bit] = result["source"]
-        else:
-            bit = int(rng)
-            if 0 <= bit < total_width:
-                result["bits"][bit] = result["source"]
-
-    return result
-
-
-def print_pretty_parsed(parsed_list):
-    for parsed in parsed_list:
-        print("=" * 60)
-        print("PARSING RESULT (DESTINATION)")
-        print("=" * 60)
-        print(f"Full string: {parsed['full']}")
-
-        target_info = f"{parsed['target']}"
-        if parsed['target_range']:
-            target_info += f" [range: {parsed['target_range']}]"
-        target_info += f" [width: {parsed['target_width']}]"
-        print(f"Target: {target_info}")
-
-        source_info = f"{parsed['source']}"
-        if parsed['source_range']:
-            source_info += f" [range: {parsed['source_range']}]"
-        source_info += f" [width: {parsed['source_width']}]"
-        print(f"Source: {source_info}")
-
-        if parsed['condition']:
-            print(f"Condition: {parsed['condition']}")
-        if parsed['default']:
-            print(f"Default: {parsed['default']}")
-        if parsed['comment']:
-            print(f"Comment: {parsed['comment']}")
-        print("=" * 60)
-        print()
-
-
-def generate_markdown_table_bitwise(parsed_results, dest_filter, total_width=16):
-    lines = []
-    lines.append(f"| {dest_filter} | source | comment |")
-    lines.append("|-------|---------|---------|")
-
-    bit_map = {}
-    for item in parsed_results:
-        if item["target"] == dest_filter:
-            for bit, name in item["bits"].items():
-                if name != "-":
-                    bit_map[bit] = (name, item["comment"])
-
-    for bit in range(total_width - 1, -1, -1):
-        if bit in bit_map:
-            name, comment = bit_map[bit]
-            lines.append(f"| {bit} | {name} | {comment} |")
-        else:
-            lines.append(f"| {bit} | - | |")
-
-    return "\n".join(lines)
-
-
-def save_markdown_table(table, dest_filter, file_path):
-    dir_name = os.path.dirname(file_path)
-    if dir_name:
-        output_file = os.path.join(dir_name, f"{dest_filter}_dest.md")
-    else:
-        output_file = f"{dest_filter}_dest.md"
-    with open(output_file, 'w', encoding='utf-8') as f:
-        f.write(table)
-    print(f"Table saved to: {output_file}")
-
-
-def process_destination(lines, dest_filter, total_width, file_src):
-    filtered = filter_assigns_by_destination(lines, dest_filter)
-
-    parsed_results = []
-    for line in filtered:
-        parsed = parse_dest_line_bitwise(line, total_width, dest_filter)
-        if parsed:
-            parsed_results.append(parsed)
-
-    print_pretty_parsed(parsed_results)
-    print(json.dumps(parsed_results, indent=2, ensure_ascii=False))
-
-    print("\n=== Markdown Table (Destination) ===")
-    table = generate_markdown_table_bitwise(parsed_results, dest_filter, total_width)
-    print(table)
-    save_markdown_table(table, dest_filter, file_src)
-
-    return parsed_results
+    json_to_markdown_table(output)
+    save_markdown_to_file(output, file_src)
 
 
 def main():
-    config = load_config("data/config.json")
-    file_src = config["file_src"]
-    configs = config["configs"]
+    config = load_config("config.json")
+    file_src = config.get("file_src")
+    if not file_src:
+        print("Ошибка: в config.json отсутствует ключ 'file_src'", file=sys.stderr)
+        sys.exit(1)
 
-    lines = read_file_lines(file_src)
+    configs = config.get("configs", [])
+    if not configs:
+        print("Ошибка: в config.json отсутствует или пуст список 'configs'", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        lines = read_file_lines(file_src)
+    except FileNotFoundError:
+        print(f"Ошибка: файл '{file_src}' не найден", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"Ошибка при чтении файла: {e}", file=sys.stderr)
+        sys.exit(1)
 
     for cfg in configs:
-        dest_filter = cfg["port_filter"]  # используем тот же порт, но смотрим на destination
-        total_width = cfg["total_width"]
-
-        print(f"\n=== Processing DESTINATION {dest_filter} (width {total_width}) ===")
-        process_destination(lines, dest_filter, total_width, file_src)
+        port_filter = cfg.get("port_filter")
+        total_width_cfg = cfg.get("total_width")
+        if not port_filter:
+            print("Пропуск элемента конфигурации без 'port_filter'", file=sys.stderr)
+            continue
+        process_port_destination(lines, port_filter, total_width_cfg, file_src)
 
 
 if __name__ == "__main__":

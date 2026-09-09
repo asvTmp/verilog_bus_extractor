@@ -1,7 +1,7 @@
 {
     "file_src": "./data/tmp.v",
     "configs": [
-      {"port_filter": "port_o", "total_width": 16},
-      {"port_filter": "port_x", "total_width": 8}
+      {"port_filter": "port_o", "total_width": 8},
+      {"port_filter": "port_x", "total_width": 16}
     ]
   }

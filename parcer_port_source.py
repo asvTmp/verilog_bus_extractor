@@ -1,12 +1,16 @@
+# parcer_port_source.py
+
 import sys
 import json
 import os
 import re
-
-
-def read_file_lines(file_path):
-    with open(file_path, 'r') as f:
-        return f.readlines()
+from parcer_port import (
+    read_file_lines,
+    load_config,
+    print_pretty_parsed,
+    generate_markdown_table_bitwise,
+    save_markdown_table
+)
 
 
 def filter_assigns_by_port(lines, port_name):
@@ -20,11 +24,6 @@ def filter_assigns_by_port(lines, port_name):
             if port_name in parts[1]:
                 result.append(line)
     return result
-
-
-def load_config(config_file="data/config.json"):
-    with open(config_file, 'r') as f:
-        return json.load(f)
 
 
 def parse_assign_line_bitwise(line, total_width=16, port_filter=None):
@@ -185,68 +184,6 @@ def parse_assign_line_bitwise(line, total_width=16, port_filter=None):
     return result
 
 
-def print_pretty_parsed(parsed_list):
-    for parsed in parsed_list:
-        print("=" * 60)
-        print("PARSING RESULT")
-        print("=" * 60)
-        print(f"Full string: {parsed['full']}")
-
-        target_info = f"{parsed['target']}"
-        if parsed['target_range']:
-            target_info += f" [range: {parsed['target_range']}]"
-        target_info += f" [width: {parsed['target_width']}]"
-        print(f"Target: {target_info}")
-
-        source_info = f"{parsed['source']}"
-        if parsed['source_range']:
-            source_info += f" [range: {parsed['source_range']}]"
-        source_info += f" [width: {parsed['source_width']}]"
-        print(f"Source: {source_info}")
-
-        if parsed['condition']:
-            print(f"Condition: {parsed['condition']}")
-        if parsed['default']:
-            print(f"Default: {parsed['default']}")
-        if parsed['comment']:
-            print(f"Comment: {parsed['comment']}")
-        print("=" * 60)
-        print()
-
-
-def generate_markdown_table_bitwise(parsed_results, source_port, total_width=16):
-    lines = []
-    lines.append(f"| {source_port} | name | comment |")
-    lines.append("|-------|---------|---------|")
-
-    bit_map = {}
-    for item in parsed_results:
-        if item["source"] == source_port:
-            for bit, name in item["bits"].items():
-                if name != "-":
-                    bit_map[bit] = (name, item["comment"])
-
-    for bit in range(total_width - 1, -1, -1):
-        if bit in bit_map:
-            name, comment = bit_map[bit]
-            lines.append(f"| {bit} | {name} | {comment} |")
-        else:
-            lines.append(f"| {bit} | - | |")
-
-    return "\n".join(lines)
-
-
-def save_markdown_table(table, port_filter, file_path):
-    dir_name = os.path.dirname(file_path)
-    if dir_name:
-        output_file = os.path.join(dir_name, f"{port_filter}.md")
-    else:
-        output_file = f"{port_filter}.md"
-    with open(output_file, 'w', encoding='utf-8') as f:
-        f.write(table)
-    print(f"Table saved to: {output_file}")
-
-
 def process_port_source(lines, port_filter, total_width, file_src):
     filtered = filter_assigns_by_port(lines, port_filter)
 
@@ -256,19 +193,19 @@ def process_port_source(lines, port_filter, total_width, file_src):
         if parsed:
             parsed_results.append(parsed)
 
-    print_pretty_parsed(parsed_results)
+    print_pretty_parsed(parsed_results, mode="source")
     print(json.dumps(parsed_results, indent=2, ensure_ascii=False))
 
     print("\n=== Markdown Table ===")
-    table = generate_markdown_table_bitwise(parsed_results, port_filter, total_width)
+    table = generate_markdown_table_bitwise(parsed_results, port_filter, total_width, mode="source")
     print(table)
-    save_markdown_table(table, port_filter, file_src)
+    save_markdown_table(table, port_filter, file_src, mode="source")
 
     return parsed_results
 
 
 def main():
-    config = load_config("data/config.json")
+    config = load_config("config.json")
     file_src = config["file_src"]
     configs = config["configs"]
 
@@ -278,7 +215,7 @@ def main():
         port_filter = cfg["port_filter"]
         total_width = cfg["total_width"]
 
-        print(f"\n=== Processing {port_filter} (width {total_width}) ===")
+        print(f"\n=== Processing SOURCE {port_filter} (width {total_width}) ===")
         process_port_source(lines, port_filter, total_width, file_src)
 
 
