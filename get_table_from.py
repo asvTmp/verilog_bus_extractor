@@ -31,7 +31,7 @@ def processing_main(port_filter_1, port_filter_2, total_width, file_src, file_ds
 
 def main():
 
-    config = load_config("./data/config_p.json")
+    config = load_config("./config_p.json")
     for cfg in config:
         param = config.get(cfg)
         file_src =          param.get("file_src")

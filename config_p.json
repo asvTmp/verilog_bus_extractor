@@ -1,0 +1,9 @@
+{
+  "tempo_tempo": {
+    "file_src"      : "./data/tmp.v",
+    "file_dst"      : "./data/tmp.v",
+    "port_filter_1" : "port_x",
+    "port_filter_2" : "port_o",
+    "total_width"   : 16 
+  }  
+}
